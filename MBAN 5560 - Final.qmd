@@ -1,0 +1,1257 @@
+---
+title: "<span style='color: green; font-size: 35px;'>Predicting Article Popularity in Online News Media</span>"
+title-block-banner-color: "lime"
+author: "Chiamaka Ogugua"
+subtitle: "Machine learning & Artificial Intelligence - Final Project"
+format:
+  html:
+    embed-resources: true
+    code-background: true
+toc: true
+toc-float: true
+number-sections: true
+theme: united
+highlight: tango
+---
+
+# Data collection and Pre-Processing
+## Package Initializing
+```{r, warning=FALSE, message=FALSE}
+# Load the required libraries
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(rpart)
+library(ggcorrplot)
+library(corrplot)
+library(caret)
+library(randomForest)
+library(ROCR)
+library(doParallel)
+library(foreach)
+library(DataExplorer)
+library(skimr)
+```
+
+Import the data and view the first few rows to understand its content
+```{r}
+# Load the data
+file_path <- "/Users/chiamakaogugua/Desktop/MBAN_SMU/MBAN 5560/Final/OnlineNewsPopularity/OnlineNewsPopularity.csv"
+name_path <- "/Users/chiamakaogugua/Desktop/MBAN_SMU/MBAN 5560/Final/OnlineNewsPopularity/OnlineNewsPopularity.names"
+
+# Read the CSV file into a data frame
+data <- read.csv(file_path)
+
+# Read the names file
+names <- readLines(name_path)
+
+# View the first few rows of the data frame
+head(data)
+```
+
+Get an understanding of what each feature represents by viewing the data dictionary.
+```{r}
+# View the names file
+print(names)
+```
+
+
+```{r}
+# Get a summary of the data
+skim(data)
+
+introduce(data)
+```
+
+```{r}
+# Check how many unique values are in each column
+unique_values <- sapply(data, function(x) length(unique(x)))
+
+# Show the unique values as a data frame
+unique_values_df <- data.frame(unique_values)
+print(unique_values_df)
+```
+
+```{r}
+# convert variables to factors if they contain only 2 unique values(0 and 1)
+data <- data %>%
+  mutate_if(~length(unique(.)) == 2, as.factor)
+```
+
+
+Handle Outliers
+```{r}
+# Create a dataframe to store the 1 percentile and 99 percentile values of each numeric variable
+percentile_df <- data.frame(
+  Variable = character(),
+  P1 = numeric(),
+  P99 = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Calculate the 1 percentile and 99 percentile values for each numeric variable except the target variable
+for (col in names(data)) {
+  if (is.numeric(data[[col]]) && col != "shares") {
+    p1 <- quantile(data[[col]], probs = 0.01)
+    p99 <- quantile(data[[col]], probs = 0.99)
+    percentile_df <- rbind(percentile_df, data.frame(Variable = col, P1 = p1, P99 = p99))
+  }
+}
+
+# Trim the dataset at the 1 percentile and 99 percentile values
+for (i in 1:nrow(percentile_df)) {
+  col <- percentile_df$Variable[i]
+  p1 <- percentile_df$P1[i]
+  p99 <- percentile_df$P99[i]
+  data <- data[data[[col]] >= p1 & data[[col]] <= p99, ]
+}
+
+rownames(percentile_df) <- NULL
+```
+
+```{r}
+# Summary statistics of the data as a data frame
+summary_df <- data.frame(
+  Variable = character(),
+  Quantile_1 = numeric(),
+  Mean = numeric(),
+  Median = numeric(),
+  Min = numeric(),
+  Max = numeric(),
+  SD = numeric(),
+  Quantile_3 = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Store the summary statistics of each numeric variable in the data frame
+for (col in names(data)) {
+  if (is.numeric(data[[col]])) {
+    quantile_1 <- quantile(data[[col]], probs = 0.25)
+    mean_val <- mean(data[[col]], na.rm = TRUE)
+    median_val <- median(data[[col]], na.rm = TRUE)
+    min_val <- min(data[[col]], na.rm = TRUE)
+    max_val <- max(data[[col]], na.rm = TRUE)
+    sd_val <- sd(data[[col]], na.rm = TRUE)
+    quantile_3 <- quantile(data[[col]], probs = 0.75)
+    summary_df <- rbind(summary_df, data.frame(Variable = col, 
+                                               Quantile_1 = quantile_1, 
+                                               Mean = mean_val, 
+                                               Median = median_val, 
+                                               Min = min_val, 
+                                               Max = max_val, 
+                                               SD = sd_val,
+                                               Quantile_3 = quantile_3))
+  }
+}
+
+rownames(summary_df) <- NULL
+```
+
+```{r}
+# Display the summary statistics of the data
+print(summary_df)
+```
+
+```{r}
+glimpse(data)
+```
+
+```{r}
+# Convert shares to a categorical variable with 3 levels
+# thresh_1 = 1000
+# thresh_2 = 3000
+
+# data$Popularity <- ifelse(data$shares < thresh_1, 'Unpopular', ifelse(data$shares < thresh_2, 'Regular', 'Popular'))
+
+# Convert expensive to a factor variable
+# data$Popularity <- as.factor(data$Popularity)
+```
+
+
+```{r}
+# Convert shares to a categorical variable with 2 levels
+thresh = 5000
+
+data$Popularity <- ifelse(data$shares >= thresh, 'Popular', 'Unpopular')
+
+# Convert expensive to a factor variable
+data$Popularity <- as.factor(data$Popularity)
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+# Scale the data
+numeric_vars <- data %>% select_if(is.numeric) %>% names()
+numeric_cols <- data[, numeric_vars]
+
+# Normalize the data
+normalize <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x)))
+}
+
+scaled_data <- as.data.frame(apply(numeric_cols, 2, normalize))
+
+# Update the original data frame with the scaled data
+data[, names(scaled_data)] <- scaled_data
+```
+
+
+Visualize the distribution of the data
+```{r, warning=FALSE, message=FALSE}
+# Plot distribution of all categorical variables
+plot_bar(data)
+```
+
+```{r}
+introduce(data)
+plot_intro(data)
+plot_density(data)
+```
+
+Drop constant numeric and character variables
+```{r}
+# Identify numeric and factor variables
+numeric_cols <- sapply(data, is.numeric)
+factor_cols <- sapply(data, is.factor)
+
+# Calculate variance for numeric variables
+variance <- apply(data[, numeric_cols], 2, var)
+
+# Filter numeric variables with variance >= 0
+selected_numeric_cols <- names(variance[variance >= 0])
+
+# Combine selected numeric and factor variables
+selected_cols <- c(selected_numeric_cols, names(data)[factor_cols])
+
+# Subset the dataset with selected columns
+data_filtered <- data[selected_cols]
+```
+
+```{r}
+# Check for correlation between numeric variables
+numeric_vars <- data_filtered %>% select_if(is.numeric) %>% names()
+numeric_cols <- data_filtered[, numeric_vars]
+
+# Calculate the correlation matrix with numerical variables
+correlation_matrix <- abs(cor(numeric_cols)) # Absolute value of the correlation matrix
+
+# Plot the correlation matrix
+corrplot(correlation_matrix, 
+         method = "circle", 
+         number.cex = 0.2, 
+         tl.srt = 90, 
+         tl.cex = 0.4, 
+         order = "hclust", 
+         type = "upper", 
+         tl.col = "black")
+```
+
+```{r}
+# Find highly correlated variables
+highly_correlated <- findCorrelation(correlation_matrix, cutoff = 0.8)
+highly_correlated_vars <- names(numeric_cols)[highly_correlated]
+
+# Remove highly correlated variables
+clean_df <- data_filtered[, !names(data_filtered) %in% highly_correlated_vars]
+
+# Display the structure of the clean dataset
+head(clean_df)
+```
+
+```{r}
+# View the number of levels of each of the factor variables in the data
+factor_cols <- sapply(clean_df, is.factor)
+factor_col_names <- names(factor_cols[factor_cols])
+levels_count <- sapply(data[, factor_col_names], function(x) length(levels(x)))
+levels_count_df <- data.frame(levels_count)
+print(levels_count_df)
+```
+
+```{r}
+# Check for missing values in the data
+any(is.na(clean_df))
+```
+
+**Distribution Tables and Visualizations**
+```{r}
+# Show a popularity distribution table
+popularity_table <- table(clean_df$Popularity)
+popularity_table
+
+# Plot the popularity distribution
+barplot(popularity_table, col = "lightblue", main = "Popularity Distribution", xlab = "Popularity", ylab = "Frequency")
+```
+
+```{r}
+# Create a dataframe to store the channel distribution
+Channel_distr <- data.frame(
+  Channel = character(),
+  Yes = numeric(),
+  No = numeric(),
+  stringsAsFactors = FALSE
+)
+
+channels <- c("data_channel_is_lifestyle", "data_channel_is_entertainment", "data_channel_is_bus", 
+              "data_channel_is_socmed", "data_channel_is_tech", "data_channel_is_world")
+
+channel_type <- c("Lifestyle", "Entertainment", "Business", "Social Media", "Technology", "World")
+
+# Calculate the distribution of each channel
+for (i in 1:length(channels)) {
+  channel <- channels[i]
+  yes_count <- sum(clean_df[[channel]] == 1)
+  no_count <- sum(clean_df[[channel]] == 0)
+  Channel_distr <- rbind(Channel_distr, data.frame(Channel = channel_type[i], Yes = yes_count, No = no_count))
+}
+
+rownames(Channel_distr) <- NULL
+
+# Display the channel distribution table
+Channel_distr
+
+# plot the channel distribution table
+gather(Channel_distr, key = "Response", value = "Count", -Channel) %>%
+  ggplot(aes(x = Channel, y = Count, fill = Response)) +
+  geom_bar(stat = "identity", position = 'dodge') +
+  labs(title = "Channel Distribution", x = "Channel", y = "Count") +
+  scale_fill_manual(values = c("Yes" = "darkgreen", "No" = "maroon")) +  # Specify colors for "Yes" and "No" bars
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+```
+
+```{r}
+# Create a dataframe to store the day distribution
+Day_distr <- data.frame(
+  Day = character(),
+  Yes = numeric(),
+  No = numeric(),
+  stringsAsFactors = FALSE
+)
+
+days <- c("weekday_is_monday", "weekday_is_tuesday", "weekday_is_wednesday", 
+          "weekday_is_thursday", "weekday_is_friday", "weekday_is_saturday", "weekday_is_sunday", "is_weekend")
+
+day_name <- c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday", "Weekend")
+
+# Calculate the distribution of each day
+for (i in 1:length(days)) {
+  day <- days[i]
+  yes_count <- sum(clean_df[[day]] == 1)
+  no_count <- sum(clean_df[[day]] == 0)
+  Day_distr <- rbind(Day_distr, data.frame(Day = day_name[i], Yes = yes_count, No = no_count))
+}
+
+rownames(Day_distr) <- NULL
+
+# Display the day distribution table
+Day_distr
+
+# plot the day distribution table
+gather(Day_distr, key = "Response", value = "Count", -Day) %>%
+  ggplot(aes(x = Day, y = Count, fill = Response)) +
+  geom_bar(stat = "identity", position = 'dodge') +
+  labs(title = "Day Distribution", x = "Day", y = "Count") +
+  scale_fill_manual(values = c("Yes" = "darkgreen", "No" = "maroon")) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+```
+
+```{r}
+# plot relationship between variables
+ggplot(clean_df, aes(x = shares, y = global_subjectivity)) +
+  geom_point(color = "purple", alpha = 0.5) +
+  labs(title = "Scatterplot of shares Vs global_subjectivity",
+       y = "Global Subjectivity",
+       x = "Shares")
+
+ggplot(clean_df, aes(x = n_tokens_content, y = min_negative_polarity)) +
+  geom_point(color = "pink", alpha = 0.5) +
+  labs(title = "Scatterplot of Shares Vs Min Negative Polarity",
+       y = "Min Negative Polarity",
+       x = "Shares")
+
+ggplot(clean_df, aes(x = shares, y = rate_positive_words)) +
+  geom_point(alpha = 0.5) +
+  labs(title = "Scatterplot of Shares Vs Positive Word Rate",
+       y = "Positive Word Rate",
+       x = "Shares")
+
+ggplot(clean_df, aes(x = shares, y = num_videos)) +
+  geom_point(alpha = 0.5) +
+  labs(title = "Scatterplot of Shares Vs Number of Videos",
+       y = "Number of Videos",
+       x = "Shares")
+
+ggplot(clean_df, aes(x = shares, y = num_imgs)) +
+  geom_point(alpha = 0.5) +
+  labs(title = "Scatterplot of Shares Vs Number of Images",
+       y = "Number of Images",
+       x = "Shares")
+
+ggplot(clean_df, aes(x = weekday_is_friday, fill = Popularity)) +
+  geom_bar(position = "fill") +
+  labs(y = "Article Popularity", 
+       x = "Friday", 
+       title = "Popularity of Articles published on Friday")
+
+ggplot(clean_df, aes(x = is_weekend, fill = Popularity)) +
+  geom_bar(position = "fill") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  labs(y = "Article Popularity", 
+       x = "Weekend", 
+       title = "Popularity of Articles published on the Weekend")
+
+ggplot(clean_df, aes(x = data_channel_is_socmed, fill = Popularity)) +
+  geom_bar(position = "fill") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  labs(x = "Social Media Channel", 
+       y = "Article Popularity", 
+       title = "Popularity of Articles on Social Media")
+
+ggplot(clean_df, aes(x = data_channel_is_lifestyle, fill = Popularity)) +
+  geom_bar(position = "fill") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  labs(x = "Lifestyle Channel", 
+       y = "Article Popularity", 
+       title = "Popularity of Articles on Lifestyle Channel")
+```
+
+```{r}
+# Define regression and classification datasets
+reg_df <- clean_df %>% select(-Popularity)
+class_df <- clean_df %>% select(-shares)
+```
+
+# Model Development - Regression
+
+## Model Selection
+
+The models selected are as follows:
+
+### **Random Forest (RF)** 
+RF is an ensemble learning method that builds multiple decision trees and averages their predictions to improve accuracy and robustness.
+
+  - **Advantages**
+    - **`Robustness:`** RF is less prone to overfitting compared to many other algorithms because it builds multiple decision trees and averages their predictions.
+    - **`Handles non-linear relationships well:`** RF can capture complex interactions and non-linear relationships between features and the target variable.
+    - **Feature importance:** RF provides a measure of feature importance, which can help identify the key factors driving article popularity.
+    - **`Handles categorical features naturally:`** RF can handle categorical features without the need for one-hot encoding.
+
+  - **Disadvantages**
+    - **`Computationally expensive:`** Training multiple decision trees can be time-consuming and resource-intensive, especially with large datasets.
+    - **`Lack of interpretability:`** While RF provides feature importance, the individual trees' predictions are difficult to interpret compared to simpler models like linear regression.
+   
+
+### **Gradient Boosting Machine (GBM)**
+GBM is another ensemble learning method that builds decision trees sequentially, with each tree correcting the errors of the previous trees.
+
+  - **Advantages**
+    - **`High predictive accuracy:`** GBM sequentially builds trees, each one correcting errors of the previous trees, leading to high predictive accuracy.
+    - **`Handles missing data:`** GBM can handle missing data well by using surrogate splits.
+    - **`Feature importance:`** Like RF, GBM provides feature importance, aiding in understanding which features drive article popularity.
+    - **`Robustness to outliers:`** GBM's robustness to outliers can be advantageous in datasets where extreme values may exist.
+
+  - **Disadvantages**
+    - **`Potential overfitting:`** GBM can overfit if not properly tuned, especially with deep trees or insufficient regularization.
+    - **`Computationally expensive:`** Similar to RF, GBM training can be computationally expensive, especially with large datasets and complex models.
+    - **`Hyperparameter tuning:`** GBM requires careful tuning of hyperparameters such as learning rate, tree depth, and regularization parameters, which can be time-consuming.
+
+
+### **Extreme Gradient Boosting (XGBoost)**
+XGBoost is an optimized implementation of GBM that offers improved performance and efficiency. It uses a more regularized model formalization to control overfitting and parallel processing to speed up training.
+
+  - **Advantages**
+    - **`Computational efficiency:`** XGBoost is optimized for speed and efficiency, making it faster than traditional GBM implementations.
+    - **`Regularization:`** XGBoost includes regularization techniques like L1 and L2 regularization to prevent overfitting.
+    - **`Parallel processing:`** XGBoost can leverage parallel processing capabilities, leading to faster training times.
+    - **`Flexibility:`** XGBoost supports various objective functions and evaluation metrics, allowing customization for different regression tasks.
+
+  - **Disadvantages**
+    - **`Tuning complexity:`** While XGBoost provides default parameters, fine-tuning them for optimal performance can be complex.
+    - **`Black-box nature:`** Like GBM, XGBoost models can be challenging to interpret due to their ensemble nature and complex interactions between features.
+    - **`Sensitivity to hyperparameters:`** While XGBoost is less sensitive to some hyperparameters compared to GBM, it still requires careful tuning for optimal performance.
+
+
+### **Linear Regression (Benchmark Model)** 
+Linear regression is a simple and interpretable model that assumes a linear relationship between features and the target variable. It serves as a benchmark model for comparison with more complex algorithms because of its simplicity and ease of interpretation.
+
+  - **Advantages**
+    - **`Simplicity and interpretability:`** Linear regression provides a straightforward interpretation of the relationship between each feature and the target variable.
+    - **`Fast training:`** Linear regression typically trains quickly, even on large datasets.
+    - **`Less prone to overfitting:`** Linear regression's simplicity makes it less prone to overfitting compared to more complex models.
+
+  - **Disadvantages**
+    - **`Limited flexibility:`** Linear regression assumes a linear relationship between features and the target variable, which may not capture complex interactions.
+    - **`Limited performance with non-linear data:`** Linear regression may underperform when the relationship between features and the target variable is non-linear.
+    - **`Vulnerability to outliers:`** Linear regression can be sensitive to outliers, which can skew the model's predictions.
+
+
+
+## Model Training
+Here we will train the selected models on the regression dataset and evaluate their performance using the Root Mean Squared Percentage Error (RMSPE) metric.
+
+### Benchmark Model - Linear Regression
+```{r, warning=FALSE, message=FALSE}
+set.seed(100)
+
+# Use the dataset with the target variable as a number
+n = nrow(reg_df)
+
+# calculate the RMSPE for the LPM model
+RMSPE_lpm <- c()
+
+for (j in 1:100) {
+  set.seed(j)
+  
+  # Split the data into training and testing sets using bootstrap sampling
+  spl_reg <- unique(sample(n, n, replace = TRUE))
+  mdata_reg <- reg_df[spl_reg, ]
+  test_reg <- reg_df[-spl_reg, ]
+  
+  model_lpm <- lm(shares ~ ., data = mdata_reg)
+  phat_lpm <- predict(model_lpm, test_reg)
+  
+  RMSPE_lpm[j] <- sqrt(mean((test_reg$shares - phat_lpm)^2))
+}
+
+cat("Test RMSPE for LPM: ", mean(RMSPE_lpm), "\n")
+cat("95% CI for LPM is between: ", quantile(RMSPE_lpm, c(0.025)), "to", quantile(RMSPE_lpm, c(0.975)), "\n")
+
+plot(RMSPE_lpm, pch = 19, col = "blue", xlab = "Number of loops", ylab = "RMSPE", main = "LPM RMSPE with 95% CI")
+abline(h = mean(RMSPE_lpm), lwd = 2, lty = 2, col = "red")
+abline(h = quantile(RMSPE_lpm, 0.025), lwd = 2, lty = 2, col = "green")
+abline(h = quantile(RMSPE_lpm, 0.975), lwd = 2, lty = 2, col = "green")
+```
+
+### Random Forest Model
+**Out Of Bag(OOB) Error**
+```{r, warning=FALSE, message=FALSE}
+set.seed(100)
+
+n = nrow(reg_df)
+
+# Select 25% of the data as a small sample
+sample_size = 0.25
+sample_idx <- sample(1:n, n * sample_size, replace = FALSE)
+sample_data <- reg_df[sample_idx, ]
+
+reg_RF <- randomForest(shares ~ ., 
+                       data = sample_data, 
+                       ntree = 1000, 
+                       importance = TRUE, 
+                       localImp = TRUE)
+
+# Print the model
+reg_RF
+
+# OOB error
+head(reg_RF$mse)
+tail(reg_RF$mse)
+
+# RMSE
+rmse_pred <- predict(reg_RF, newdata = reg_df)
+RMSE_RF <- sqrt(mean((reg_df$shares - rmse_pred)^2))
+
+OOB_RMSE_RF <- reg_RF$mse[length(reg_RF$mse)]
+
+# Print the RMSE
+cat(" ", "\n")
+cat("OOB RMSE for Random Forest: ", OOB_RMSE_RF, "\n")
+
+# Plot the OOB error
+plot(reg_RF, 
+     type = "l", 
+     col = "purple", 
+     main = "Random Forest Model", 
+     lwd = 2)
+```
+
+**Test RMSPE with 95% confidence interval**
+```{r, warning=FALSE, message=FALSE}
+num_cores <- detectCores() - 1
+
+cl <- makeCluster(num_cores)
+
+registerDoParallel(cl)
+
+rf_reg <- list()
+
+test_RF_RMSE <- foreach(i = 1:100, .combine = c, .packages = c('randomForest', 'pROC')) %dopar% {
+  set.seed(i)
+  
+  samp_data <- reg_df[sample(nrow(reg_df), nrow(reg_df)*0.25, replace = FALSE), ]
+  nr = nrow(samp_data)
+  
+  train_idx_reg <- unique(sample(nr, nr, replace = TRUE))
+  test_idx_reg <- setdiff(1:nr, train_idx_reg)
+  
+  train_data <- samp_data[train_idx_reg, ]
+  test_data <- samp_data[test_idx_reg, ]
+  
+  rf_test <- randomForest(shares ~ ., 
+                          data = train_data, 
+                          ntree = 1000,
+                          importance = TRUE, 
+                          localImp = TRUE)
+  
+  rf_reg[[i]] <- rf_test
+  
+  p_test <- predict(rf_test, test_data)
+  
+  sqrt(mean((test_data$shares - p_test)^2))
+  
+}
+stopCluster(cl)
+
+# Calculate the mean and 95% CI
+cat("Test mean RMSPE:", mean(test_RF_RMSE), "\n")
+cat("95% CI for RMSPE is between:", quantile(test_RF_RMSE, 0.025), "and", quantile(test_RF_RMSE, 0.975), "\n")
+
+# Plot the test RMSPEs
+plot(test_RF_RMSE, pch = 19, col = "skyblue", xlab = "Number of iterations", ylab = "RMSPE", main = "RMSPE on Test Set")
+abline(h = mean(test_RF_RMSE), lwd = 2, lty = 2, col = "red")
+abline(h = quantile(test_RF_RMSE, 0.025), lwd = 2, lty = 2, col = "green")
+abline(h = quantile(test_RF_RMSE, 0.975), lwd = 2, lty = 2, col = "green")
+```
+
+### Gradient Boosting(GBM)
+First we create a hyperparameter grid
+```{r, warning=FALSE, message=FALSE}
+# create hyper-parameter grid
+grid <- expand.grid( # 16 rows to save time
+  shrinkage = c(0.01, 0.02, 0.05, 0.1),
+  interaction.depth = c(1, 3, 5, 7),
+  min_RMSE = NA,
+  optimal_trees = NA
+)
+
+# total number of combinations
+nrow(grid)
+```
+
+Next, we find the best hyperparameters...
+```{r, warning=FALSE, message=FALSE}
+library(gbm)
+
+# Find the best hyperparameters
+set.seed(100)
+
+n = nrow(reg_df)
+
+# test/train split
+ind_best <- sample(n, n * 0.8)
+share_model <- reg_df[ind_best, ]
+share_test <- reg_df[-ind_best, ]
+  
+for (i in 1:nrow(grid)) {
+  model_g <- gbm(shares ~ .,
+                 data = share_model, 
+                 distribution = "gaussian",
+                 n.trees = 1500,
+                 interaction.depth = grid$interaction.depth[i],
+                 shrinkage = grid$shrinkage[i],
+                 cv.folds = 10,
+                 n.cores = 12)
+  
+  grid$min_RMSE[i] <- min(model_g$cv.error)
+  grid$optimal_trees[i] <- which.min(model_g$cv.error)
+} 
+
+# reporting the best parameters
+best_index <- which.min(grid$min_RMSE)
+best_params <- grid[best_index, ]
+best_params
+```
+
+**Test RMSE with 95% confidence interval**
+```{r, warning=FALSE, message=FALSE}
+# now feed the best parameter into the model using train and test sets
+RMSE_gbm = c()
+n <- nrow(reg_df)
+
+gbm_reg <- list()
+
+for (i in 1:100) {
+  set.seed(i)
+  ind <- unique(sample(n, n, replace = TRUE)) # initial split
+  m_dt <- reg_df[ind, ]
+  test_gbm <- reg_df[-ind, ]
+  
+  finalModel <- gbm(shares ~ ., 
+                    data = m_dt, 
+                    distribution = "gaussian",
+                    n.trees = best_params$optimal_tree,
+                    interaction.depth = best_params$interaction.depth,
+                    shrinkage = best_params$shrinkage,
+                    n.cores = 12)
+  
+  gbm_reg[[i]] <- finalModel
+  
+  phat_gbm <- predict(finalModel, test_gbm)
+    
+  # RMSPE
+  RMSE_gbm[i] <- sqrt(mean((test_gbm$shares - phat_gbm)^2))
+}
+
+cat("Test RMSE for GBM: ", mean(RMSE_gbm), "\n")
+cat("95% CI for GBM: ", quantile(RMSE_gbm, c(0.025, 0.975)), "\n")
+
+plot(RMSE_gbm, pch = 19, col = "blue", xlab = "Iteration", ylab = "RMSE", main = "GBM RMSE with 95% CI")
+abline(h = mean(RMSE_gbm), lwd = 2, lty = 2, col = "red")
+abline(h = quantile(RMSE_gbm, 0.025), lwd = 2, lty = 2, col = "green")
+abline(h = quantile(RMSE_gbm, 0.975), lwd = 2, lty = 2, col = "green")
+```
+
+### Extreme Gradient Boosting(XGBoost)
+```{r, warning = FALSE, message = FALSE}
+library(xgboost)
+
+# Prepare the data
+set.seed(100)
+
+n <- nrow(reg_df)
+
+ind_xgb <- sample(n, n, replace = TRUE)
+train_xgb <- reg_df[ind_xgb, ]
+test_xgb <- reg_df[-ind_xgb, ]
+
+# One-hot coding using R's `model.matrix`
+train_ <- train_xgb$shares
+test_ <- test_xgb$shares
+
+htrain_ <- model.matrix(~. -1, data = train_xgb[,-which(names(train_xgb) == "shares")]) 
+htest_ <- model.matrix(~. -1, data = test_xgb[,-which(names(test_xgb) == "shares")])
+
+# Convert the matrices to DMatrix objects
+dtrain <- xgb.DMatrix(data = htrain_, label = train_)
+dtest <- xgb.DMatrix(data = htest_, label = test_)
+
+
+# Define the parameter grid
+param_grid <- expand.grid(
+  eta = c(0.01, 0.02, 0.05, 0.1),
+  max_depth = c(1, 3, 5, 7),
+  min_child_weight = c(1, 2)
+)
+
+best_xrmse <- 0
+best_xparams <- list()
+best_xnround <- NULL
+
+for (i in 1:nrow(param_grid)) { # Using just 18 iterations to save time
+  params <- list(
+    booster = "gbtree",
+    objective = "reg:squarederror",
+    eta = param_grid$eta[i],
+    max_depth = param_grid$max_depth[i],
+    min_child_weight = param_grid$min_child_weight[i],
+    eval_metric = "rmse"
+  )
+  
+  # Perform cross-validation
+  xgb_cv <- xgb.cv(params = params, 
+                   data = dtrain,
+                   nrounds = 1500,
+                   nfold = 2,
+                   stratified = TRUE,
+                   maximize = FALSE,
+                   verbose = 0)  # Suppress verbose output
+  
+  min_rmse <- min(xgb_cv$evaluation_log$test_rmse_mean)
+  best_xnround <- which.min(xgb_cv$evaluation_log$test_rmse_mean)
+  
+  if (min_rmse < best_xrmse) {
+    best_xrmse <- min_rmse
+    best_xparams <- params
+    best_xnround <- best_xnround
+  }
+}
+  
+RMSE_xgb <- c()
+
+for (l in 1:100) {
+  set.seed(l)
+  
+  n <- nrow(reg_df)
+  ind_xgb <- unique(sample(n, n, replace = TRUE))
+  train_xgb <- reg_df[ind_xgb, ]
+  test_xgb <- reg_df[-ind_xgb, ]
+  
+  # One-hot coding using R's `model.matrix`
+  train_ <- train_xgb$shares
+  test_ <- test_xgb$shares
+  
+  htrain_ <- model.matrix(~. -1, data = train_xgb[,-which(names(train_xgb) == "shares")]) 
+  htest_ <- model.matrix(~. -1, data = test_xgb[,-which(names(test_xgb) == "shares")])
+  
+  # Convert the matrices to DMatrix objects
+  dtrain <- xgb.DMatrix(data = htrain_, label = train_)
+  dtest <- xgb.DMatrix(data = htest_, label = test_)
+
+  # Train the final model with the best parameters
+  finalModel_xgb <- xgb.train(data = dtrain, 
+                              params = best_xparams, 
+                              nrounds = best_xnround,
+                              verbose = 0)
+  
+  # RMSE calculation
+  phat_xgb <- predict(finalModel_xgb, dtest)
+  RMSE_xgb[l] <- sqrt(mean((test_xgb$shares - phat_xgb)^2))
+}
+
+cat("Test RMSE for XGB: ", mean(RMSE_xgb), "\n")
+cat("95% CI for XGB: ", quantile(RMSE_xgb, c(0.025, 0.975)), "\n")
+
+plot(RMSE_xgb, pch = 19, col = "blue", xlab = "Iteration", ylab = "RMSE", main = "XGB RMSE with 95% CI")
+abline(h = mean(RMSE_xgb), lwd = 2, lty = 2, col = "red")
+abline(h = quantile(RMSE_xgb, 0.025), lwd = 2, lty = 2, col = "green")
+abline(h = quantile(RMSE_xgb, 0.975), lwd = 2, lty = 2, col = "green")
+```
+
+## Model Evaluation
+```{r}
+# Compare the RMSE of the models
+cat("Benchmark Model (Linear Regression) RMSE: ", mean(RMSPE_lpm), "\n")
+cat("Random Forest Model RMSE: ", mean(test_RF_RMSE), "\n")
+cat("Gradient Boosting Model RMSE: ", mean(RMSE_gbm), "\n")
+cat("XGBoost Model RMSE: ", mean(RMSE_xgb), "\n")
+```
+
+```{r}
+# Put the RMSE values in a data frame
+RMSE_values <- data.frame(Model = c("LPM", "Random Forest", "Gradient Boosting", "XGBoost"),
+                          RMSE = c(mean(RMSPE_lpm), mean(test_RF_RMSE), mean(RMSE_gbm), mean(RMSE_xgb)),
+                          Confidence_Int = c(paste0(quantile(RMSPE_lpm, c(0.025)), " - ", quantile(RMSPE_lpm, 0.975)),
+                                             paste0(quantile(test_RF_RMSE, c(0.025)), " - ", quantile(test_RF_RMSE, 0.975)),
+                                             paste0(quantile(RMSE_gbm, c(0.025)), " - ", quantile(RMSE_gbm, 0.975)),
+                                             paste0(quantile(RMSE_xgb, c(0.025)), " - ", quantile(RMSE_xgb, 0.975))))
+
+RMSE_values
+```
+The GBM model has the lowest RMSE on average, indicating that it performs the best among the models evaluated. When considering the 95% confidence intervals, the GBM model's performance is significantly better than the other models, with a narrower range of RMSE values. This suggests that the GBM model is more consistent in its predictions compared to the other models. Comparing its performance to the benchmark LPM model, the GBM model does not outperform it by a considerable margin, indicating that the benchmark model is relatively competitive in this context.
+
+
+# Model Development - Classification
+
+## Model Selection
+
+The models selected for the classification task are as follows:
+
+### **Random Forest (RF)**
+RF is an ensemble learning method that builds multiple decision trees and averages their predictions to improve accuracy and robustness.
+
+  - **Advantages**
+    - **`Ensemble learning:`** RF combines multiple decision trees, making it robust against overfitting and noisy data.
+    - **`Handles high-dimensional data:`** RF can handle a large number of input features without overfitting, making it suitable for text-based classification tasks common in article popularity prediction.
+    - **`Handles categorical features naturally:`** RF can handle categorical features without the need for one-hot encoding.
+
+  - **Disadvantages**
+    - **`Sensitivity to noise:`** ALthough RF is resistant to overfitting, it can be sensitive to noisy data, leading to suboptimal performance if the dataset contains irrelevant or misleading features. 
+
+### **Gradient Boosting Machine (GBM)**
+GBM is an ensemble learning method that builds decision trees sequentially, with each tree correcting the errors of the previous trees.
+
+   - **Advantages**
+     - **`Reducing bias:`** They reduce bias in model predictions through their ensemble learning approach, iterative error correction, regularization techniques, and the combination of weak learners.
+     - **`Scalable:`** These algorithms develop base learners sequentially, making them scalable to large datasets commonly encountered in article popularity prediction tasks. They can efficiently handle a vast amount of article-related data during both training and inference stages.
+     
+   - **Disadvantages**
+     - **`Difficulty with extrapolation:`** While extrapolation is crucial for predicting outcomes outside the training data range, it can be challenging for classification models like GBMs when applied to article popularity prediction. These models may struggle to accurately predict the popularity of articles with characteristics significantly different from those in the training data.
+     - **`Data requirements and limitations:`** GBMs, in particular, typically require a substantial amount of training data to learn intricate patterns and make accurate predictions in article classification tasks. Limited or insufficient data may hinder their ability to effectively capture the complexities of article popularity dynamics, leading to suboptimal performance.
+
+### **Extreme Gradient Boosting (XGBoost)**
+XGBoost is an optimized implementation of GBM that offers improved performance and efficiency. It uses a more regularized model formalization to control overfitting and parallel processing to speed up training.
+
+   - **Advantages**
+     - **`High accuracy:`** XGBoost is known for its high accuracy, making it a popular choice for machine learning tasks that require high precision. It works by combining multiple decision trees to make more accurate predictions, making it effective for tasks such as image and speech recognition, natural language processing, and recommendation systems.
+     - **`Speed:`** XGBoost is designed to be fast and efficient, even for large datasets. It is optimized for both single- and multi-core processing, making it an excellent choice for tasks that require fast predictions.
+     
+   - **Disadvantages**
+     - **`Black-box nature:`** Like GBM, XGBoost models can be challenging to interpret due to their ensemble nature and complex interactions between features. This can make it challenging to troubleshoot and fine-tune.
+
+
+
+## Model Training
+Here we will train the selected models on the classification dataset and evaluate their performance using the Area Under the Receiver Operating Characteristic Curve (AUC) metric.
+
+### Benchmark Model - LPM
+```{r, warning=FALSE, message=FALSE}
+set.seed(100)
+
+class_lpm <- class_df
+class_lpm$Popularity <- as.numeric(class_lpm$Popularity) - 1
+
+# Use the dataset with the target variable as a number
+n = nrow(class_lpm)
+
+# calculate the AUC for the LPM model
+AUC_lpm <- c()
+for (j in 1:100) {
+  set.seed(j)
+  
+  spl <- unique(sample(n, n, replace = TRUE))
+  mdata <- class_lpm[spl, ]
+  test <- class_lpm[-spl, ]
+  
+  model_lpm <- lm(Popularity ~ ., data = mdata)
+  phat_lpm <- predict(model_lpm, test, type = "response")
+  phat_lpm <- pmax(0, pmin(1, phat_lpm))  
+  
+  pred_rocr <- prediction(phat_lpm, test$Popularity)
+  auc_ROCR <- performance(pred_rocr, measure = "auc")
+  AUC_lpm[j] <- auc_ROCR@y.values[[1]]
+}
+
+cat("Test AUC for LPM: ", mean(AUC_lpm), "\n")
+cat("95% CI for LPM: ", quantile(AUC_lpm, c(0.025, 0.975)), "\n")
+  
+plot(AUC_lpm, pch = 19, col = "blue", xlab = "Iteration", ylab = "AUC", main = "LPM AUC with 95% CI")
+abline(h = mean(AUC_lpm), lwd = 2, lty = 2, col = "red")
+abline(h = quantile(AUC_lpm, 0.025), lwd = 2, lty = 2, col = "green")
+abline(h = quantile(AUC_lpm, 0.975), lwd = 2, lty = 2, col = "green")
+```
+
+### Random Forest
+```{r, warning=FALSE, message=FALSE}
+set.seed(100)
+
+num_cores <- detectCores() - 1
+
+cl <- makeCluster(num_cores)
+registerDoParallel(cl)
+
+# Use the dataset with the target variable as a factor
+n = nrow(class_df)
+rf_class <- list()
+
+test_AUC <- foreach(i = 1:100, .combine = c, .packages = c('randomForest', 'pROC')) %dopar% {
+  set.seed(i)
+
+  train_idx <- sample(n, n, replace = TRUE)
+  test_idx <- setdiff(1:n, train_idx)
+  
+  train <- class_df[train_idx, ]
+  test <- class_df[test_idx, ]
+  
+  rf_test <- randomForest(Popularity ~ ., 
+                          data = train, 
+                          ntree = 1000,
+                          importance = TRUE,
+                          localImp = TRUE)
+  
+  rf_class[[i]] <- rf_test
+  
+  p_test <- predict(rf_test, test, type = "prob")[,2]
+  
+  roc_curve <- roc(test$Popularity, p_test)
+  auc(roc_curve)
+}
+
+stopCluster(cl)
+
+# Calculate the mean and 95% CI
+cat("Mean Test AUC: ", mean(test_AUC), "\n")
+cat("95% CI: ", quantile(test_AUC, c(0.025, 0.975)), "\n")
+
+plot(test_AUC, pch = 19, col = "blue", xlab = "Iteration", ylab = "AUC", main = "RF Test AUCs")
+abline(h = mean(test_AUC), lwd = 2, lty = 2, col = "red")
+abline(h = quantile(test_AUC, 0.025), lwd = 2, lty = 2, col = "green")
+abline(h = quantile(test_AUC, 0.975), lwd = 2, lty = 2, col = "green")
+```
+
+### Gradient Boosting(GBM)
+
+First we go through the grid to find the best hyperparameters...
+```{r, warning=FALSE, message=FALSE}
+n = nrow(class_lpm)
+
+# test/train split
+ind_best <- unique(sample(n, n, replace = TRUE))
+pop_model <- class_lpm[ind_best, ]
+pop_test <- class_lpm[-ind_best, ]
+  
+for (i in 1:nrow(grid)) {
+  gbm_class <- gbm(Popularity ~ .,
+                 data = pop_model,
+                 distribution = "bernoulli",
+                 n.trees = 1500,
+                 interaction.depth = grid$interaction.depth[i],
+                 shrinkage = grid$shrinkage[i],
+                 cv.folds = 10,
+                 n.cores = 12)
+  
+  grid$min_RMSE[i] <- min(gbm_class$cv.error)
+  grid$optimal_trees[i] <- which.min(gbm_class$cv.error)
+} 
+
+# reporting the best parameters
+best_index_ <- which.min(grid$min_RMSE)
+best_params_ <- grid[best_index_, ]
+best_params_
+```
+
+We find the best AUC...
+```{r}
+# find the best AUC
+gbm_best <- gbm(Popularity ~ ., data = pop_model, distribution = "bernoulli",
+                  n.trees = best_params_$optimal_trees,
+                  interaction.depth = best_params_$interaction.depth,
+                  shrinkage = best_params_$shrinkage,
+                  n.cores = 7) 
+  
+phat_gbm_best <- predict(gbm_best, pop_test, type = "response")
+  
+# AUC
+pred_best <- prediction(phat_gbm_best, pop_test$Popularity)
+perf_best <- performance(pred_best, "auc")
+Best_AUC <- perf_best@y.values[[1]]
+Best_AUC
+```
+
+Next, we calculate the test AUC with 95% confidence interval...
+```{r, warning=FALSE, message=FALSE}
+
+Class_AUC_gbm = c()
+n <- nrow(class_lpm)
+
+gbm_list <- list()
+
+for (i in 1:100) {
+  set.seed(i)
+  ind <- unique(sample(n, n, replace = TRUE))
+  m_dt <- class_lpm[ind, ]
+  test_gbm <- class_lpm[-ind, ]
+  
+  finalModel_ <- gbm(Popularity ~ ., 
+                    data = m_dt, 
+                    distribution = "bernoulli",
+                    n.trees = best_params_$optimal_tree,
+                    interaction.depth = best_params_$interaction.depth,
+                    shrinkage = best_params_$shrinkage,
+                    n.cores = 12)
+  
+  gbm_list[[i]] <- finalModel_
+  
+  phat_gbm <- predict(finalModel_, test_gbm, type = "response")
+    
+  # AUC
+  pred_gbm <- prediction(phat_gbm, test_gbm$Popularity)
+  perf_gbm <- performance(pred_gbm, "auc")
+  Class_AUC_gbm[i] <- perf_gbm@y.values[[1]]
+}
+
+cat("Test AUC for GBM: ", mean(Class_AUC_gbm), "\n")
+cat("95% CI for GBM: ", quantile(Class_AUC_gbm, c(0.025, 0.975)), "\n")
+
+plot(Class_AUC_gbm, pch = 19, col = "blue", xlab = "Iteration", ylab = "AUC", main = "GBM AUC with 95% CI")
+abline(h = mean(Class_AUC_gbm), lwd = 2, lty = 2, col = "red")
+abline(h = quantile(Class_AUC_gbm, 0.025), lwd = 2, lty = 2, col = "green")
+abline(h = quantile(Class_AUC_gbm, 0.975), lwd = 2, lty = 2, col = "green")
+```
+
+### XGBoost
+```{r, warning = FALSE, message = FALSE}
+library(xgboost)
+
+# Prepare the data
+set.seed(100)
+
+n <- nrow(class_lpm)
+
+ind_xgb <- unique(sample(n, n, replace = TRUE))
+class_xgb_train <- class_lpm[ind_xgb, ]
+class_xgb_test <- class_lpm[-ind_xgb, ]
+
+# One-hot coding using R's `model.matrix`
+train_y_xgb <- class_xgb_train$Popularity
+test_y_xgb <- class_xgb_test$Popularity
+
+htrain_xgb <- model.matrix(~. -1, data = class_xgb_train[,-which(names(class_xgb_train) == "Popularity")]) 
+htest_xgb <- model.matrix(~. -1, data = class_xgb_test[,-which(names(class_xgb_test) == "Popularity")])
+
+# Convert the matrices to DMatrix objects
+dtrain1 <- xgb.DMatrix(data = htrain_xgb, label = train_y_xgb)
+dtest1 <- xgb.DMatrix(data = htest_xgb, label = test_y_xgb)
+
+
+# Define the parameter grid
+param_grid <- expand.grid(
+  eta = c(0.01, 0.02, 0.05, 0.1),
+  max_depth = c(1, 3, 5, 7),
+  min_child_weight = c(1, 2)
+)
+
+best_xauc <- 0
+best_xparams <- list()
+best_xnround <- NULL
+
+for (i in 1:nrow(param_grid)) { # Using just 18 iterations to save time
+  params <- list(
+    booster = "gbtree",
+    objective = "binary:logistic",
+    eta = param_grid$eta[i],
+    max_depth = param_grid$max_depth[i],
+    min_child_weight = param_grid$min_child_weight[i],
+    eval_metric = "auc"
+  )
+  
+  # Perform cross-validation
+  xgb_cv <- xgb.cv(params = params, 
+                   data = dtrain1,
+                   nrounds = 1500,
+                   nfold = 2,
+                   stratified = TRUE,
+                   maximize = FALSE,
+                   verbose = 0)  # Suppress verbose output
+  
+  max_auc <- max(xgb_cv$evaluation_log$test_auc_mean)
+  best_xnround <- which.max(xgb_cv$evaluation_log$test_auc_mean)
+  
+  if (max_auc > best_xauc) {
+    best_xauc <- max_auc
+    best_xparams <- params
+    best_nrounds_for_best_params <- best_xnround
+  }
+}
+ 
+auc_xgb <- c()
+
+for (v in 1:100) {
+  set.seed(v)
+  
+  n <- nrow(class_lpm)
+
+  ind_xgb <- unique(sample(n, n, replace = TRUE))
+  class_xgb_train <- class_lpm[ind_xgb, ]
+  class_xgb_test <- class_lpm[-ind_xgb, ]
+  
+  # One-hot coding using R's `model.matrix`
+  train_y_xgb <- class_xgb_train$Popularity
+  test_y_xgb <- class_xgb_test$Popularity
+  
+  htrain_xgb <- model.matrix(~. -1, data = class_xgb_train[,-which(names(class_xgb_train) == "Popularity")]) 
+  htest_xgb <- model.matrix(~. -1, data = class_xgb_test[,-which(names(class_xgb_test) == "Popularity")])
+  
+  # Convert the matrices to DMatrix objects
+  dtrain1 <- xgb.DMatrix(data = htrain_xgb, label = train_y_xgb)
+  dtest1 <- xgb.DMatrix(data = htest_xgb, label = test_y_xgb)
+  
+  # Train the final model with the best parameters
+  finalModel_xgbc <- xgb.train(data = dtrain1, 
+                              params = best_xparams, 
+                              nrounds = best_xnround,
+                              verbose = 0)
+  
+  # Predictions and AUC calculation
+  phat_xgb <- predict(finalModel_xgbc, dtest1)
+  pred_xgb <- prediction(phat_xgb, test_y_xgb)
+  perf_xgb <- performance(pred_xgb, "auc")
+  auc_xgb[v] <- perf_xgb@y.values[[1]]
+}
+
+# Print the test AUC score
+cat("Test AUC for XGB: ", mean(auc_xgb), "\n")
+cat("95% CI for XGB: ", quantile(auc_xgb, c(0.025, 0.975)), "\n")
+
+plot(auc_xgb, pch = 19, col = "blue", xlab = "Iteration", ylab = "AUC", main = "XGB AUC with 95% CI")
+abline(h = mean(auc_xgb), lwd = 2, lty = 2, col = "red")
+abline(h = quantile(auc_xgb, 0.025), lwd = 2, lty = 2, col = "green")
+abline(h = quantile(auc_xgb, 0.975), lwd = 2, lty = 2, col = "green")
+```
+
+## Model Evaluation
+```{r}
+# Compare the AUC of the models
+cat("Benchmark Model (LPM) AUC: ", mean(AUC_lpm), "\n")
+cat("Random Forest Model AUC: ", mean(test_AUC), "\n")
+cat("Gradient Boosting Model AUC: ", mean(Class_AUC_gbm), "\n")
+cat("XGBoost Model AUC: ", mean(auc_xgb), "\n")
+```
+
+```{r}
+# Put the AUC values in a data frame
+AUC_values <- data.frame(Model = c("LPM", "Random Forest", "Gradient Boosting", "XGBoost"),
+                          AUC = c(mean(AUC_lpm), mean(test_AUC), mean(Class_AUC_gbm), mean(auc_xgb)),
+                          Confidence_Int = c(paste0(quantile(AUC_lpm, c(0.025)), " - ", quantile(AUC_lpm, 0.975)),
+                                             paste0(quantile(test_AUC, c(0.025)), " - ", quantile(test_AUC, 0.975)),
+                                             paste0(quantile(Class_AUC_gbm, c(0.025)), " - ", quantile(Class_AUC_gbm, 0.975)),
+                                             paste0(quantile(auc_xgb, c(0.025)), " - ", quantile(auc_xgb, 0.975))))
+
+AUC_values
+```
+
+After training and evaluating these classification models, the GBM model achieved the highest AUC score on average, indicating superior performance in predicting article popularity compared to the other models. The model's AUC score was higher than the benchmark LPM model, Random Forest, and XGB models, suggesting that it is the most effective model for this classification task. It also gives higher AUC scores 95% of the time, indicating that it is more consistent in its predictions compared to the other models.
+
+
+## Confusion Matrix - GBM
+```{r}
+# Extract the sensitivity and specificity
+perf_dt <- performance(pred_gbm, "sens", "spec")
+sensitivity <- perf_dt@y.values[[1]]
+specificity <- perf_dt@x.values[[1]]
+
+# Calculate Youden's Index
+youden_index <- sensitivity + specificity - 1
+
+# Find the maximum Youden's index and corresponding cutoff
+max_index <- which.max(youden_index)
+max_youden_index <- youden_index[max_index]
+
+# Optimal discriminating threshold
+Optimal_dt <- perf_dt@alpha.values[[1]][max_index]
+Optimal_dt
+```
+
+```{r}
+# Confusion matrix
+p_gbm <- ifelse(phat_gbm > Optimal_dt, 1, 0)
+cm_GBM <- table(p_gbm, test_gbm$Popularity)
+cm_GBM <- cm_GBM[c(2, 1), c(2, 1)]
+cm_GBM
+```
+
+# Model Interpretation
+## Feature Importance Analysis and Visualization - GBM
+```{r}
+# Classification GBM
+library(vip)
+summary.gbm(finalModel_)
+vip::vip(finalModel_)
+```
+
+```{r}
+# Regression GBM
+summary.gbm(finalModel)
+vip::vip(finalModel)
+```
+The feature importance analysis provides insights into the relative importance of each feature in predicting the target variable (shares for regression and popularity for classification). The VIP plots show that the top 5 features contributing to the model's predictions are `kw_avg_avg`, `kw_max_avg`, `self_reference_avg_sharess`, `num_imgs`, and `max_negative_polarity` for regression and `kw_avg_avg`, `kw_max_avg`, `self_reference_avg_sharess`, `self_reference_min_shares`, and `kw_min_avg` for classification. These features are related to the number of images, polarity, shares and keywords in the articles, indicating that these metrics play a crucial role in predicting article popularity and shares.
+
+
+# Conclusion
+The analysis of the Online News Popularity dataset aimed to predict article popularity and shares using regression and classification models. The project involved data preprocessing, exploratory data analysis, feature engineering, model development, and evaluation. The key findings and insights from the analysis are summarized below:
+
+
+**Regression Models**
+
+- The Gradient Boosting Machine (GBM) model outperformed the other regression models, achieving the lowest Root Mean Squared Prediction Error (RMSPE) and the highest predictive performance.
+- The Random Forest (RF) model also performed well, with competitive RMSE values compared to the GBM model.
+
+
+**Classification Models**
+
+- The GBM model achieved the highest Area Under the Receiver Operating Characteristic Curve (AUC) score on average, indicating superior performance in predicting article popularity compared to the other models.
+- The XGBoost model also performed well, with a competitive AUC score, but slightly lower than the GBM model.
+
+
+**Feature Importance Analysis**
+
+- The feature importance analysis revealed that metrics related to keywords, shares, polarity, and the number of images in the articles were crucial in predicting article popularity and shares.
+
+
+**Actionable Insights**
+
+- These insights can help content creators understand the factors that influence article popularity and tailor their content strategies to improve engagement and reach. They can focus on optimizing articles with specific keywords, images, and polarity to increase their popularity and shares.
+
+
+**Challenges and Future Research**
+
+- Challenges encountered during the project included handling missing values, excessive computation time for feature selection, and model tuning. Future research could focus on addressing these challenges by exploring more efficient feature selection techniques, parallel processing, and automated hyper-parameter tuning methods.
+- The project's outcomes demonstrate the value of machine learning in predicting article popularity and informing content strategies, providing actionable insights that can be utilized to optimize article and increase engagement.
